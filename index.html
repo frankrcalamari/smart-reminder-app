@@ -299,6 +299,7 @@ kbd{background:#0b1220;padding:.15rem .35rem;border-radius:8px;border:1px solid 
   <div class="card">
     <h1>Welcome 👋</h1>
     <small>This app saves to your browser. Use Backup in Settings to export/import.</small>
+    <input id="userEmail" type="email" placeholder="Email address" autocomplete="email">
     <input id="username" placeholder="Your name">
 
     <h3 style="margin:.75rem 0 .25rem 0">Core habit targets</h3>
@@ -324,8 +325,8 @@ kbd{background:#0b1220;padding:.15rem .35rem;border-radius:8px;border:1px solid 
     </div>
 
     <div class="row" style="margin-top:.75rem">
-      <button onclick="startApp()">Start</button>
-      <button class="secondary" onclick="clearSaved()">Reset Saved Data</button>
+      <button onclick="startApp()">Sign In</button>
+      <button class="secondary" onclick="clearSaved()">Reset This Account</button>
     </div>
   </div>
 </div>
@@ -664,6 +665,38 @@ kbd{background:#0b1220;padding:.15rem .35rem;border-radius:8px;border:1px solid 
       <small>Backup/export is useful before you ship to App Store.</small>
 
       <hr>
+      <h3 style="margin:.2rem 0">Notifications</h3>
+      <small>Get reminder notifications when tasks are still pending.</small>
+      <div class="row" style="margin-top:.45rem">
+        <button id="notifToggleBtn" class="secondary" onclick="toggleNotifications()">Enable Notifications</button>
+      </div>
+      <div class="row" style="margin-top:.35rem">
+        <label>Morning</label>
+        <input id="notifTimeMorning" type="time" value="09:00" onchange="setNotificationTime('morning', this.value)">
+      </div>
+      <div class="row" style="margin-top:.35rem">
+        <label>Afternoon</label>
+        <input id="notifTimeAfternoon" type="time" value="14:00" onchange="setNotificationTime('afternoon', this.value)">
+      </div>
+      <div class="row" style="margin-top:.35rem">
+        <label>Night</label>
+        <input id="notifTimeNight" type="time" value="20:00" onchange="setNotificationTime('night', this.value)">
+      </div>
+      <div class="row" style="margin-top:.35rem">
+        <label>Morning message</label>
+        <input id="notifMsgMorning" placeholder="You still have {pending} tasks left today." onchange="setNotificationMessage('morning', this.value)">
+      </div>
+      <div class="row" style="margin-top:.35rem">
+        <label>Afternoon message</label>
+        <input id="notifMsgAfternoon" placeholder="You still have {pending} tasks left today." onchange="setNotificationMessage('afternoon', this.value)">
+      </div>
+      <div class="row" style="margin-top:.35rem">
+        <label>Night message</label>
+        <input id="notifMsgNight" placeholder="You still have {pending} tasks left today." onchange="setNotificationMessage('night', this.value)">
+      </div>
+      <small id="notifStatus">Status: unavailable</small>
+
+      <hr>
       <h3 style="margin:.2rem 0">Backup</h3>
       <div class="row">
         <button class="secondary" onclick="exportBackup()">Export JSON</button>
@@ -731,8 +764,26 @@ let selectedTaskId = null;
 
 const LS_KEY = "smartHabitApp_prototype_v1";
 const STORAGE_VERSION = 2;
+const ACCOUNT_LAST_KEY = "smartHabitApp_last_email_v1";
+const LEGACY_MIGRATED_KEY = "smartHabitApp_legacy_migrated_v1";
+let currentEmail = "";
 
 const pad2 = n => String(n).padStart(2,"0");
+function normalizeEmail(email){
+  return String(email || "").trim().toLowerCase();
+}
+function validEmail(email){
+  return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email);
+}
+function accountKey(email){
+  return `${LS_KEY}__${normalizeEmail(email)}`;
+}
+function defaultNameFromEmail(email){
+  const local = normalizeEmail(email).split("@")[0] || "friend";
+  const pretty = local.replace(/[._-]+/g, " ").trim();
+  if(!pretty) return "Friend";
+  return pretty.charAt(0).toUpperCase() + pretty.slice(1);
+}
 const todayISO = () => {
   const d = new Date();
   return `${d.getFullYear()}-${pad2(d.getMonth()+1)}-${pad2(d.getDate())}`;
@@ -861,6 +912,16 @@ function migrateLoadedData(rawData){
   user = data.user ?? {name:""};
   meta = data.meta ?? {xp:0,lastMonthReward:null,targetScale:{}};
   meta.targetScale ??= {};
+  meta.notifications ??= {
+    enabled:false,
+    times:{morning:"09:00", afternoon:"14:00", night:"20:00"},
+    messages:{
+      morning:"You still have {pending} tasks left today.",
+      afternoon:"You still have {pending} tasks left today.",
+      night:"You still have {pending} tasks left today."
+    },
+    sentKeys:{}
+  };
 
   habits.forEach(h=>{
     if(normalizeHabitShape(h)) mutated = true;
@@ -871,31 +932,289 @@ function migrateLoadedData(rawData){
   return {mutated};
 }
 
+function notificationPrefs(){
+  meta.notifications ??= {
+    enabled:false,
+    times:{morning:"09:00", afternoon:"14:00", night:"20:00"},
+    messages:{
+      morning:"You still have {pending} tasks left today.",
+      afternoon:"You still have {pending} tasks left today.",
+      night:"You still have {pending} tasks left today."
+    },
+    sentKeys:{}
+  };
+  // migrate from older single-time preference
+  if(meta.notifications.time && (!meta.notifications.times || !meta.notifications.times.morning)){
+    meta.notifications.times = {
+      morning: meta.notifications.time || "09:00",
+      afternoon: "14:00",
+      night: "20:00"
+    };
+    delete meta.notifications.time;
+  }
+  meta.notifications.times ??= {};
+  meta.notifications.times.morning ||= "09:00";
+  meta.notifications.times.afternoon ||= "14:00";
+  meta.notifications.times.night ||= "20:00";
+  meta.notifications.messages ??= {};
+  meta.notifications.messages.morning ||= "You still have {pending} tasks left today.";
+  meta.notifications.messages.afternoon ||= "You still have {pending} tasks left today.";
+  meta.notifications.messages.night ||= "You still have {pending} tasks left today.";
+  meta.notifications.sentKeys ??= {};
+  return meta.notifications;
+}
+
+function notificationsSupported(){
+  return typeof Notification !== "undefined";
+}
+
+function notificationsGranted(){
+  return notificationsSupported() && Notification.permission === "granted";
+}
+
+function isNotificationTimePassed(hm){
+  const parts = String(hm || "18:00").split(":");
+  const h = Number(parts[0] || 18);
+  const m = Number(parts[1] || 0);
+  const now = new Date();
+  if(now.getHours() > h) return true;
+  if(now.getHours() < h) return false;
+  return now.getMinutes() >= m;
+}
+
+function isWithinReminderWindow(hm){
+  const parts = String(hm || "").split(":");
+  const h = Number(parts[0] || 0);
+  const m = Number(parts[1] || 0);
+  const now = new Date();
+  const nowMins = now.getHours() * 60 + now.getMinutes();
+  const slotMins = h * 60 + m;
+  const delta = nowMins - slotMins;
+  return delta >= 0 && delta <= 59;
+}
+
+function syncNotificationUI(){
+  const btn = document.getElementById("notifToggleBtn");
+  const inputMorning = document.getElementById("notifTimeMorning");
+  const inputAfternoon = document.getElementById("notifTimeAfternoon");
+  const inputNight = document.getElementById("notifTimeNight");
+  const msgMorning = document.getElementById("notifMsgMorning");
+  const msgAfternoon = document.getElementById("notifMsgAfternoon");
+  const msgNight = document.getElementById("notifMsgNight");
+  const status = document.getElementById("notifStatus");
+  if(!btn || !inputMorning || !inputAfternoon || !inputNight || !msgMorning || !msgAfternoon || !msgNight || !status) return;
+
+  const prefs = notificationPrefs();
+  inputMorning.value = prefs.times.morning;
+  inputAfternoon.value = prefs.times.afternoon;
+  inputNight.value = prefs.times.night;
+  msgMorning.value = prefs.messages.morning;
+  msgAfternoon.value = prefs.messages.afternoon;
+  msgNight.value = prefs.messages.night;
+
+  if(!notificationsSupported()){
+    btn.textContent = "Notifications Unavailable";
+    btn.disabled = true;
+    inputMorning.disabled = true;
+    inputAfternoon.disabled = true;
+    inputNight.disabled = true;
+    msgMorning.disabled = true;
+    msgAfternoon.disabled = true;
+    msgNight.disabled = true;
+    status.textContent = "Status: this browser does not support notifications.";
+    return;
+  }
+
+  inputMorning.disabled = !prefs.enabled;
+  inputAfternoon.disabled = !prefs.enabled;
+  inputNight.disabled = !prefs.enabled;
+  msgMorning.disabled = !prefs.enabled;
+  msgAfternoon.disabled = !prefs.enabled;
+  msgNight.disabled = !prefs.enabled;
+
+  if(!prefs.enabled){
+    btn.textContent = "Enable Notifications";
+    btn.disabled = false;
+    status.textContent = `Status: off. Morning ${prefs.times.morning}, afternoon ${prefs.times.afternoon}, night ${prefs.times.night}.`;
+    return;
+  }
+
+  if(notificationsGranted()){
+    btn.textContent = "Disable Notifications";
+    btn.disabled = false;
+    status.textContent = `Status: on. Morning ${prefs.times.morning}, afternoon ${prefs.times.afternoon}, night ${prefs.times.night}.`;
+    return;
+  }
+
+  btn.textContent = "Allow Notifications";
+  btn.disabled = false;
+  status.textContent = "Status: permission needed.";
+}
+
+async function toggleNotifications(){
+  const prefs = notificationPrefs();
+  if(!notificationsSupported()){
+    alert("Notifications are not supported in this browser.");
+    return;
+  }
+
+  if(prefs.enabled && notificationsGranted()){
+    prefs.enabled = false;
+    save();
+    syncNotificationUI();
+    return;
+  }
+
+  if(Notification.permission === "default"){
+    const perm = await Notification.requestPermission();
+    if(perm !== "granted"){
+      prefs.enabled = false;
+      save();
+      syncNotificationUI();
+      return;
+    }
+  }
+
+  if(Notification.permission === "denied"){
+    alert("Notification permission is blocked. Enable it in browser settings.");
+    prefs.enabled = false;
+    save();
+    syncNotificationUI();
+    return;
+  }
+
+  prefs.enabled = true;
+  save();
+  syncNotificationUI();
+}
+
+function setNotificationTime(slot, value){
+  const prefs = notificationPrefs();
+  if(!["morning","afternoon","night"].includes(slot)) return;
+  prefs.times[slot] = value || prefs.times[slot];
+  save();
+  syncNotificationUI();
+}
+
+function setNotificationMessage(slot, value){
+  const prefs = notificationPrefs();
+  if(!["morning","afternoon","night"].includes(slot)) return;
+  const next = String(value || "").trim();
+  prefs.messages[slot] = next || "You still have {pending} tasks left today.";
+  save();
+  syncNotificationUI();
+}
+
+function maybeSendPendingReminder(){
+  const prefs = notificationPrefs();
+  if(!prefs.enabled) return;
+  if(!notificationsGranted()) return;
+  if(app.classList.contains("hidden")) return;
+
+  const iso = todayISO();
+  const due = habits.filter(h=>h.active && habitDueOnISO(h, iso));
+  const pending = due.filter(h=>getDayStatus(h, iso)==="pending").length;
+  if(pending <= 0) return;
+
+  const slots = [
+    {key:"morning", label:"Morning"},
+    {key:"afternoon", label:"Afternoon"},
+    {key:"night", label:"Night"}
+  ];
+  for(const slot of slots){
+    const hm = prefs.times[slot.key];
+    if(!isWithinReminderWindow(hm)) continue;
+    const sentKey = `${iso}-${slot.key}`;
+    if(prefs.sentKeys[sentKey]) continue;
+    try{
+      const template = String(prefs.messages[slot.key] || "You still have {pending} tasks left today.");
+      const body = template.replace(/\{pending\}/g, String(pending));
+      new Notification(`${slot.label} Habit Reminder`, {
+        body
+      });
+      prefs.sentKeys[sentKey] = 1;
+      // cleanup old sent keys
+      Object.keys(prefs.sentKeys).forEach(k=>{
+        if(!k.startsWith(iso)) delete prefs.sentKeys[k];
+      });
+      save();
+    }catch(e){
+      // ignore delivery failures
+    }
+    break;
+  }
+}
+
+function prefillSetupFromCoreHabits(){
+  coreHabits.forEach(ch=>{
+    const h = habits.find(x=>x.core && x.name===ch.name);
+    const id = `setup_${ch.name.replace(/\s+/g,"_")}`;
+    const el = document.getElementById(id);
+    if(el && h) el.value = h.amount;
+  });
+}
+
 function save(){
+  if(!currentEmail) return;
   try{
-    localStorage.setItem(LS_KEY, JSON.stringify({
+    localStorage.setItem(accountKey(currentEmail), JSON.stringify({
       schemaVersion: STORAGE_VERSION,
       savedAtISO: new Date().toISOString(),
       habits, events, stats, user, meta
     }));
+    localStorage.setItem(ACCOUNT_LAST_KEY, currentEmail);
   }catch(e){
     // Storage can be blocked in some browser/file contexts; keep UI working.
   }
 }
-function load(){
+function loadLegacyGlobal(){
+  if(localStorage.getItem(LEGACY_MIGRATED_KEY) === "1") return false;
   try{
     const raw = localStorage.getItem(LS_KEY);
     if(!raw) return false;
     const data = JSON.parse(raw);
     const {mutated} = migrateLoadedData(data);
     ensureCoreHabits(false);
+    localStorage.setItem(LEGACY_MIGRATED_KEY, "1");
+    localStorage.removeItem(LS_KEY);
+    if(mutated) save();
+    return true;
+  }catch(e){ return false; }
+}
+
+function load(email){
+  try{
+    const normalized = normalizeEmail(email);
+    if(!normalized) return false;
+    const raw = localStorage.getItem(accountKey(normalized));
+    if(!raw) return false;
+    const data = JSON.parse(raw);
+    const {mutated} = migrateLoadedData(data);
+    currentEmail = normalized;
+    user.email = normalized;
+    ensureCoreHabits(false);
+    notificationPrefs();
     if(mutated) save();
     return true;
   }catch(e){ return false; }
 }
 function clearSaved(){
-  try{ localStorage.removeItem(LS_KEY); }catch(e){}
-  alert("Saved data cleared. Reload the page.");
+  const typedEmail = normalizeEmail((document.getElementById("userEmail") || {}).value || currentEmail);
+  if(!typedEmail){
+    alert("Enter an email first.");
+    return;
+  }
+  if(!confirm(`Reset all saved data for ${typedEmail} on this device?`)) return;
+  try{ localStorage.removeItem(accountKey(typedEmail)); }catch(e){}
+  if(localStorage.getItem(ACCOUNT_LAST_KEY) === typedEmail){
+    localStorage.removeItem(ACCOUNT_LAST_KEY);
+  }
+  alert(`Saved data cleared for ${typedEmail}.`);
+  if(typedEmail === currentEmail){
+    currentEmail = "";
+    app.classList.add("hidden");
+    login.classList.remove("hidden");
+  }
 }
 
 /* -------------------- Setup UI defaults -------------------- */
@@ -906,13 +1225,25 @@ function hydrateCalendarDefaults(){
 
 /* -------------------- Login / Start -------------------- */
 function startApp(){
-  // if saved exists, we still let the user set name
-  load();
+  const typedEmail = normalizeEmail((userEmail.value || ""));
+  if(!validEmail(typedEmail)){
+    alert("Enter a valid email address.");
+    return;
+  }
+  currentEmail = typedEmail;
+  let hadSaved = load(currentEmail);
+  if(!hadSaved && loadLegacyGlobal()){
+    hadSaved = true;
+    user.email = currentEmail;
+  }
 
-  user.name = (username.value || "Friend").trim();
+  const typedName = (username.value || "").trim();
+  if(typedName) user.name = typedName;
+  if(!user.name) user.name = defaultNameFromEmail(currentEmail);
+  user.email = currentEmail;
 
   // Ensure core habits exist (and use setup targets)
-  ensureCoreHabits(true);
+  ensureCoreHabits(!hadSaved);
 
   // hide login, show app
   login.classList.add("hidden");
@@ -2019,6 +2350,16 @@ async function importBackupFile(file){
     user = data.user ?? user;
     meta = data.meta ?? meta;
     meta.targetScale ??= meta.targetScale || {};
+    meta.notifications ??= {
+      enabled:false,
+      times:{morning:"09:00", afternoon:"14:00", night:"20:00"},
+      messages:{
+        morning:"You still have {pending} tasks left today.",
+        afternoon:"You still have {pending} tasks left today.",
+        night:"You still have {pending} tasks left today."
+      },
+      sentKeys:{}
+    };
 
     // sanitize & migrate
     habits.forEach(h=>{
@@ -2058,6 +2399,8 @@ function renderAll(){
   renderTasks();
   renderHabits();
   renderCalendar();
+  syncNotificationUI();
+  maybeSendPendingReminder();
   if(typeof fab !== "undefined") fab.classList.toggle("hidden", habits.classList.contains("hidden"));
 }
 
@@ -2065,20 +2408,21 @@ function renderAll(){
 (function boot(){
   registerPWA();
   document.addEventListener("keydown", handleGlobalShortcuts);
-  // prefill login from saved data (but never auto-enter)
-  if(load()){
-    username.value = user?.name || "";
-    // prefill setup amounts from saved core habits if present
-    coreHabits.forEach(ch=>{
-      const h = habits.find(x=>x.core && x.name===ch.name);
-      const id = `setup_${ch.name.replace(/\s+/g,"_")}`;
-      const el = document.getElementById(id);
-      if(el && h) el.value = h.amount;
-    });
-  }
+  setInterval(maybeSendPendingReminder, 60000);
   hydrateCalendarDefaults();
+  const lastEmail = normalizeEmail(localStorage.getItem(ACCOUNT_LAST_KEY));
+  if(lastEmail && load(lastEmail)){
+    userEmail.value = lastEmail;
+    username.value = user?.name || "";
+    prefillSetupFromCoreHabits();
+    app.classList.remove("hidden");
+    login.classList.add("hidden");
+    renderAll();
+    return;
+  }
   app.classList.add("hidden");
   login.classList.remove("hidden");
+  if(lastEmail) userEmail.value = lastEmail;
 })();
 </script>
 
