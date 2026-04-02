@@ -303,31 +303,47 @@ kbd{background:#0b1220;padding:.15rem .35rem;border-radius:8px;border:1px solid 
     <input id="userPassword" type="password" placeholder="Password (for cloud sign-in)" autocomplete="current-password">
     <input id="username" placeholder="Your name">
 
+    <div class="row" style="margin-top:.75rem">
+      <button onclick="startApp('signin')">Sign In</button>
+      <button class="secondary" onclick="startApp('signup')">Create Account</button>
+      <button class="secondary" onclick="forgotPassword()">Forgot Password</button>
+    </div>
+    <div class="row" style="margin-top:.5rem">
+      <button class="secondary" onclick="clearSaved()">Reset This Account</button>
+    </div>
+  </div>
+</div>
+
+<!-- ONBOARDING -->
+<div id="onboarding" class="container hidden">
+  <div class="card">
+    <h1>Set Your Targets</h1>
+    <small>Answer these once. You can edit any target later in Habits.</small>
+
     <h3 style="margin:.75rem 0 .25rem 0">Core habit targets</h3>
     <small>Run uses miles, Drink Water uses fl oz.</small>
     <div id="setupHabits">
       <label>Workout (mins/day)</label>
       <input id="setup_Workout" type="number" min="1" value="30">
-    
+
       <label>Run (miles/day)</label>
       <input id="setup_Run" type="number" min="1" value="2">
-    
+
       <label>Meditate (mins/day)</label>
       <input id="setup_Meditate" type="number" min="1" value="10">
-    
+
       <label>Drink Water (fl oz/day)</label>
       <input id="setup_Drink_Water" type="number" min="1" value="64">
-    
+
       <label>Study (mins/day)</label>
       <input id="setup_Study" type="number" min="1" value="30">
-    
+
       <label>Read (pages/day)</label>
       <input id="setup_Read" type="number" min="1" value="10">
     </div>
 
     <div class="row" style="margin-top:.75rem">
-      <button onclick="startApp()">Sign In</button>
-      <button class="secondary" onclick="clearSaved()">Reset This Account</button>
+      <button onclick="finishOnboarding()">Continue</button>
     </div>
   </div>
 </div>
@@ -775,7 +791,7 @@ let habits = [];
 let events = [];
 let stats = {strength:0, health:0, intellect:0, mind:0, growth:0, discipline:0};
 let user = {name:""};
-let meta = {xp:0, lastMonthReward:null, targetScale:{}}; // monthKey string
+let meta = {xp:0, lastMonthReward:null, targetScale:{}, onboardingComplete:false}; // monthKey string
 let justCompleted = new Set();
 let pendingAmount = null;
 let pendingNote = null;
@@ -800,6 +816,15 @@ let cloud = {
   pushTimer: null,
   listenerReady: false
 };
+
+function defaultMeta(){
+  return {
+    xp:0,
+    lastMonthReward:null,
+    targetScale:{},
+    onboardingComplete:false
+  };
+}
 
 const pad2 = n => String(n).padStart(2,"0");
 function normalizeEmail(email){
@@ -846,6 +871,39 @@ function buildStatePayload(){
 function applyStatePayload(payload){
   const {mutated} = migrateLoadedData(payload || {});
   if(mutated) save();
+}
+function showLogin(){
+  onboarding.classList.add("hidden");
+  app.classList.add("hidden");
+  login.classList.remove("hidden");
+}
+function showOnboarding(){
+  login.classList.add("hidden");
+  app.classList.add("hidden");
+  onboarding.classList.remove("hidden");
+}
+function showApp(){
+  login.classList.add("hidden");
+  onboarding.classList.add("hidden");
+  app.classList.remove("hidden");
+  hydrateCalendarDefaults();
+  renderAll();
+}
+function resetStateForNewUser(){
+  habits = [];
+  events = [];
+  stats = {strength:0, health:0, intellect:0, mind:0, growth:0, discipline:0};
+  meta = defaultMeta();
+  meta.notifications = {
+    enabled:false,
+    times:{morning:"09:00", afternoon:"14:00", night:"20:00"},
+    messages:{
+      morning:"You still have {pending} tasks left today.",
+      afternoon:"You still have {pending} tasks left today.",
+      night:"You still have {pending} tasks left today."
+    },
+    sentKeys:{}
+  };
 }
 function syncCloudStatus(msg){
   const el = document.getElementById("cloudStatus");
@@ -917,16 +975,39 @@ async function signInCloud(email, password){
     syncCloudStatus(`signed in as ${email}.`);
     return true;
   }catch(e){
-    const code = e && e.code ? String(e.code) : "";
-    if(code.includes("user-not-found")){
-      const cred = await cloud.auth.createUserWithEmailAndPassword(email, password);
-      cloud.user = cred.user;
-      syncCloudStatus(`new account created for ${email}.`);
-      return true;
-    }
     alert(`Cloud sign-in failed: ${e.message || "unknown error"}`);
     syncCloudStatus("sign-in failed.");
     return false;
+  }
+}
+async function signUpCloud(email, password){
+  if(!cloud.enabled || !cloud.auth) return false;
+  try{
+    const cred = await cloud.auth.createUserWithEmailAndPassword(email, password);
+    cloud.user = cred.user;
+    syncCloudStatus(`account created for ${email}.`);
+    return true;
+  }catch(e){
+    alert(`Create account failed: ${e.message || "unknown error"}`);
+    syncCloudStatus("create account failed.");
+    return false;
+  }
+}
+async function forgotPassword(){
+  const email = normalizeEmail((userEmail && userEmail.value) || "");
+  if(!validEmail(email)){
+    alert("Enter your email first.");
+    return;
+  }
+  if(!cloud.enabled || !cloud.auth){
+    alert("Connect Firebase first in Settings > Cloud Sync.");
+    return;
+  }
+  try{
+    await cloud.auth.sendPasswordResetEmail(email);
+    alert("Password reset email sent.");
+  }catch(e){
+    alert(`Password reset failed: ${e.message || "unknown error"}`);
   }
 }
 async function pullCloudState(){
@@ -972,16 +1053,23 @@ function setupCloudAuthListener(){
         const cloudEmail = normalizeEmail(u.email || "");
         if(cloudEmail){
           currentEmail = cloudEmail;
-          load(cloudEmail);
+          const hadLocal = load(cloudEmail);
+          if(!hadLocal) resetStateForNewUser();
           userEmail.value = cloudEmail;
           username.value = user?.name || "";
         }
-        login.classList.add("hidden");
-        app.classList.remove("hidden");
-        renderAll();
       }
-      await pullCloudState();
-      renderAll();
+      const hadCloud = await pullCloudState();
+      if(!hadCloud && meta.onboardingComplete === false){
+        showOnboarding();
+        return;
+      }
+      if(meta.onboardingComplete === false){
+        prefillSetupFromCoreHabits();
+        showOnboarding();
+        return;
+      }
+      showApp();
     }else{
       syncCloudStatus("connected. Sign in to sync.");
     }
@@ -1113,8 +1201,12 @@ function migrateLoadedData(rawData){
   events = Array.isArray(data.events) ? data.events : [];
   stats = data.stats ?? {strength:0,health:0,intellect:0,mind:0,growth:0,discipline:0};
   user = data.user ?? {name:""};
-  meta = data.meta ?? {xp:0,lastMonthReward:null,targetScale:{}};
+  meta = data.meta ?? defaultMeta();
   meta.targetScale ??= {};
+  if(meta.onboardingComplete === undefined){
+    meta.onboardingComplete = Array.isArray(data.habits) && data.habits.length > 0;
+    mutated = true;
+  }
   meta.notifications ??= {
     enabled:false,
     times:{morning:"09:00", afternoon:"14:00", night:"20:00"},
@@ -1416,8 +1508,7 @@ function clearSaved(){
   alert(`Saved data cleared for ${typedEmail}.`);
   if(typedEmail === currentEmail){
     currentEmail = "";
-    app.classList.add("hidden");
-    login.classList.remove("hidden");
+    showLogin();
   }
 }
 
@@ -1428,7 +1519,14 @@ function hydrateCalendarDefaults(){
 }
 
 /* -------------------- Login / Start -------------------- */
-async function startApp(){
+function finishOnboarding(){
+  ensureCoreHabits(true);
+  meta.onboardingComplete = true;
+  save();
+  showApp();
+}
+
+async function startApp(mode){
   const typedEmail = normalizeEmail((userEmail.value || ""));
   if(!validEmail(typedEmail)){
     alert("Enter a valid email address.");
@@ -1447,28 +1545,50 @@ async function startApp(){
   if(!user.name) user.name = defaultNameFromEmail(currentEmail);
   user.email = currentEmail;
 
-  // Ensure core habits exist (and use setup targets)
-  ensureCoreHabits(!hadSaved);
-
   if(cloud.enabled){
     if(typedPassword.length < 6){
       alert("Enter a password with at least 6 characters for cloud auth.");
       return;
     }
-    const authed = await signInCloud(currentEmail, typedPassword);
+    const action = mode === "signup" ? "signup" : "signin";
+    const authed = action === "signup"
+      ? await signUpCloud(currentEmail, typedPassword)
+      : await signInCloud(currentEmail, typedPassword);
     if(!authed) return;
-    const foundCloudState = await pullCloudState();
+    const foundCloudState = action === "signin" ? await pullCloudState() : false;
+    if(foundCloudState) hadSaved = true;
     if(!foundCloudState){
-      await pushCloudState();
+      if(hadSaved){
+        // First cloud connection for an existing local account.
+        await pushCloudState();
+      }else{
+        resetStateForNewUser();
+        user.email = currentEmail;
+        user.name = typedName || defaultNameFromEmail(currentEmail);
+        showOnboarding();
+        return;
+      }
     }
   }
 
-  // hide login, show app
-  login.classList.add("hidden");
-  app.classList.remove("hidden");
-  hydrateCalendarDefaults();
+  if(!hadSaved){
+    resetStateForNewUser();
+    user.email = currentEmail;
+    user.name = typedName || defaultNameFromEmail(currentEmail);
+    showOnboarding();
+    return;
+  }
+
+  // Existing user path
+  ensureCoreHabits(false);
+  if(meta.onboardingComplete === false){
+    prefillSetupFromCoreHabits();
+    showOnboarding();
+    return;
+  }
+
   save();
-  renderAll();
+  showApp();
 }
 
 /* -------------------- Tabs -------------------- */
@@ -2640,14 +2760,15 @@ function renderAll(){
   if(lastEmail && load(lastEmail)){
     userEmail.value = lastEmail;
     username.value = user?.name || "";
-    prefillSetupFromCoreHabits();
-    app.classList.remove("hidden");
-    login.classList.add("hidden");
-    renderAll();
+    if(meta.onboardingComplete === false){
+      prefillSetupFromCoreHabits();
+      showOnboarding();
+      return;
+    }
+    showApp();
     return;
   }
-  app.classList.add("hidden");
-  login.classList.remove("hidden");
+  showLogin();
   if(lastEmail) userEmail.value = lastEmail;
 })();
 </script>
