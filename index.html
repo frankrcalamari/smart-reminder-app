@@ -304,13 +304,14 @@ kbd{background:#0b1220;padding:.15rem .35rem;border-radius:8px;border:1px solid 
     <input id="username" placeholder="Your name">
 
     <div class="row" style="margin-top:.75rem">
-      <button onclick="startApp('signin')">Sign In</button>
-      <button class="secondary" onclick="startApp('signup')">Create Account</button>
-      <button class="secondary" onclick="forgotPassword()">Forgot Password</button>
+      <button id="signInBtn" onclick="startApp('signin')">Sign In</button>
+      <button id="signUpBtn" class="secondary" onclick="startApp('signup')">Create Account</button>
+      <button id="forgotBtn" class="secondary" onclick="forgotPassword()">Forgot Password</button>
     </div>
     <div class="row" style="margin-top:.5rem">
-      <button class="secondary" onclick="clearSaved()">Reset This Account</button>
+      <button id="resetAccountBtn" class="secondary" onclick="clearSaved()">Reset This Account</button>
     </div>
+    <small id="authStatus">Status: ready.</small>
   </div>
 </div>
 
@@ -876,6 +877,7 @@ function showLogin(){
   onboarding.classList.add("hidden");
   app.classList.add("hidden");
   login.classList.remove("hidden");
+  setAuthLoading(false, "ready.");
 }
 function showOnboarding(){
   login.classList.add("hidden");
@@ -904,6 +906,29 @@ function resetStateForNewUser(){
     },
     sentKeys:{}
   };
+}
+function setAuthStatus(msg){
+  const el = document.getElementById("authStatus");
+  if(el) el.textContent = `Status: ${msg}`;
+}
+function setAuthLoading(isLoading, msg){
+  const ids = ["signInBtn","signUpBtn","forgotBtn","resetAccountBtn","userEmail","userPassword","username"];
+  ids.forEach(id=>{
+    const el = document.getElementById(id);
+    if(el) el.disabled = !!isLoading;
+  });
+  if(msg) setAuthStatus(msg);
+}
+function authErrorMessage(err, action){
+  const code = String((err && err.code) || "");
+  if(code.includes("invalid-email")) return "That email format is invalid.";
+  if(code.includes("wrong-password")) return "Incorrect password.";
+  if(code.includes("user-not-found")) return "No account exists for that email. Use Create Account.";
+  if(code.includes("email-already-in-use")) return "That email already has an account. Use Sign In.";
+  if(code.includes("invalid-credential")) return "Email or password is incorrect.";
+  if(code.includes("too-many-requests")) return "Too many attempts. Try again in a few minutes.";
+  if(code.includes("network-request-failed")) return "Network error. Check connection and try again.";
+  return `${action} failed. ${err && err.message ? err.message : "Please try again."}`;
 }
 function syncCloudStatus(msg){
   const el = document.getElementById("cloudStatus");
@@ -975,7 +1000,7 @@ async function signInCloud(email, password){
     syncCloudStatus(`signed in as ${email}.`);
     return true;
   }catch(e){
-    alert(`Cloud sign-in failed: ${e.message || "unknown error"}`);
+    setAuthStatus(authErrorMessage(e, "Sign in"));
     syncCloudStatus("sign-in failed.");
     return false;
   }
@@ -988,7 +1013,7 @@ async function signUpCloud(email, password){
     syncCloudStatus(`account created for ${email}.`);
     return true;
   }catch(e){
-    alert(`Create account failed: ${e.message || "unknown error"}`);
+    setAuthStatus(authErrorMessage(e, "Create account"));
     syncCloudStatus("create account failed.");
     return false;
   }
@@ -996,18 +1021,21 @@ async function signUpCloud(email, password){
 async function forgotPassword(){
   const email = normalizeEmail((userEmail && userEmail.value) || "");
   if(!validEmail(email)){
-    alert("Enter your email first.");
+    setAuthStatus("Enter a valid email first.");
     return;
   }
   if(!cloud.enabled || !cloud.auth){
-    alert("Connect Firebase first in Settings > Cloud Sync.");
+    setAuthStatus("Connect Firebase first in Settings > Cloud Sync.");
     return;
   }
+  setAuthLoading(true, "Sending reset email...");
   try{
     await cloud.auth.sendPasswordResetEmail(email);
-    alert("Password reset email sent.");
+    setAuthStatus("Password reset email sent.");
   }catch(e){
-    alert(`Password reset failed: ${e.message || "unknown error"}`);
+    setAuthStatus(authErrorMessage(e, "Password reset"));
+  }finally{
+    setAuthLoading(false);
   }
 }
 async function pullCloudState(){
@@ -1527,9 +1555,11 @@ function finishOnboarding(){
 }
 
 async function startApp(mode){
+  setAuthLoading(true, mode === "signup" ? "Creating account..." : "Signing in...");
   const typedEmail = normalizeEmail((userEmail.value || ""));
   if(!validEmail(typedEmail)){
-    alert("Enter a valid email address.");
+    setAuthStatus("Enter a valid email address.");
+    setAuthLoading(false);
     return;
   }
   const typedPassword = String((userPassword && userPassword.value) || "").trim();
@@ -1547,14 +1577,19 @@ async function startApp(mode){
 
   if(cloud.enabled){
     if(typedPassword.length < 6){
-      alert("Enter a password with at least 6 characters for cloud auth.");
+      setAuthStatus("Password must be at least 6 characters.");
+      setAuthLoading(false);
       return;
     }
     const action = mode === "signup" ? "signup" : "signin";
     const authed = action === "signup"
       ? await signUpCloud(currentEmail, typedPassword)
       : await signInCloud(currentEmail, typedPassword);
-    if(!authed) return;
+    if(!authed){
+      setAuthLoading(false);
+      return;
+    }
+    setAuthStatus("Syncing cloud data...");
     const foundCloudState = action === "signin" ? await pullCloudState() : false;
     if(foundCloudState) hadSaved = true;
     if(!foundCloudState){
@@ -1565,6 +1600,7 @@ async function startApp(mode){
         resetStateForNewUser();
         user.email = currentEmail;
         user.name = typedName || defaultNameFromEmail(currentEmail);
+        setAuthLoading(false);
         showOnboarding();
         return;
       }
@@ -1575,6 +1611,7 @@ async function startApp(mode){
     resetStateForNewUser();
     user.email = currentEmail;
     user.name = typedName || defaultNameFromEmail(currentEmail);
+    setAuthLoading(false);
     showOnboarding();
     return;
   }
@@ -1583,11 +1620,13 @@ async function startApp(mode){
   ensureCoreHabits(false);
   if(meta.onboardingComplete === false){
     prefillSetupFromCoreHabits();
+    setAuthLoading(false);
     showOnboarding();
     return;
   }
 
   save();
+  setAuthLoading(false, "Signed in.");
   showApp();
 }
 
