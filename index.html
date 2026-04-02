@@ -300,6 +300,7 @@ kbd{background:#0b1220;padding:.15rem .35rem;border-radius:8px;border:1px solid 
     <h1>Welcome 👋</h1>
     <small>This app saves to your browser. Use Backup in Settings to export/import.</small>
     <input id="userEmail" type="email" placeholder="Email address" autocomplete="email">
+    <input id="userPassword" type="password" placeholder="Password (for cloud sign-in)" autocomplete="current-password">
     <input id="username" placeholder="Your name">
 
     <h3 style="margin:.75rem 0 .25rem 0">Core habit targets</h3>
@@ -697,6 +698,23 @@ kbd{background:#0b1220;padding:.15rem .35rem;border-radius:8px;border:1px solid 
       <small id="notifStatus">Status: unavailable</small>
 
       <hr>
+      <h3 style="margin:.2rem 0">Cloud Sync (Firebase)</h3>
+      <small>Use Firebase Email/Password Auth + Firestore to sync across devices.</small>
+      <div class="row" style="margin-top:.45rem">
+        <input id="fbApiKey" placeholder="Firebase API Key">
+        <input id="fbAuthDomain" placeholder="Firebase Auth Domain (e.g. your-app.firebaseapp.com)">
+      </div>
+      <div class="row" style="margin-top:.35rem">
+        <input id="fbProjectId" placeholder="Firebase Project ID">
+        <input id="fbAppId" placeholder="Firebase App ID">
+      </div>
+      <div class="row" style="margin-top:.45rem">
+        <button class="secondary" onclick="connectFirebase()">Connect Firebase</button>
+        <button class="secondary" onclick="disconnectFirebase()">Disconnect Firebase</button>
+      </div>
+      <small id="cloudStatus">Cloud status: not connected.</small>
+
+      <hr>
       <h3 style="margin:.2rem 0">Backup</h3>
       <div class="row">
         <button class="secondary" onclick="exportBackup()">Export JSON</button>
@@ -722,6 +740,10 @@ kbd{background:#0b1220;padding:.15rem .35rem;border-radius:8px;border:1px solid 
 </div>
 
 <div id="fab" class="fab hidden" onclick="openCorePicker()">+</div>
+
+<script src="https://www.gstatic.com/firebasejs/10.12.2/firebase-app-compat.js"></script>
+<script src="https://www.gstatic.com/firebasejs/10.12.2/firebase-auth-compat.js"></script>
+<script src="https://www.gstatic.com/firebasejs/10.12.2/firebase-firestore-compat.js"></script>
 
 <script>
 /* -------------------- Data + Helpers -------------------- */
@@ -766,7 +788,18 @@ const LS_KEY = "smartHabitApp_prototype_v1";
 const STORAGE_VERSION = 2;
 const ACCOUNT_LAST_KEY = "smartHabitApp_last_email_v1";
 const LEGACY_MIGRATED_KEY = "smartHabitApp_legacy_migrated_v1";
+const CLOUD_CFG_KEY = "smartHabitApp_firebase_cfg_v1";
 let currentEmail = "";
+let cloud = {
+  app: null,
+  auth: null,
+  db: null,
+  user: null,
+  enabled: false,
+  syncing: false,
+  pushTimer: null,
+  listenerReady: false
+};
 
 const pad2 = n => String(n).padStart(2,"0");
 function normalizeEmail(email){
@@ -783,6 +816,176 @@ function defaultNameFromEmail(email){
   const pretty = local.replace(/[._-]+/g, " ").trim();
   if(!pretty) return "Friend";
   return pretty.charAt(0).toUpperCase() + pretty.slice(1);
+}
+function readFirebaseConfig(){
+  try{
+    const raw = localStorage.getItem(CLOUD_CFG_KEY);
+    if(!raw) return null;
+    const cfg = JSON.parse(raw);
+    if(!cfg || !cfg.apiKey || !cfg.authDomain || !cfg.projectId || !cfg.appId) return null;
+    return cfg;
+  }catch(e){ return null; }
+}
+function writeFirebaseConfig(cfg){
+  try{ localStorage.setItem(CLOUD_CFG_KEY, JSON.stringify(cfg)); }catch(e){}
+}
+function clearFirebaseConfig(){
+  try{ localStorage.removeItem(CLOUD_CFG_KEY); }catch(e){}
+}
+function cloudDocRef(){
+  if(!cloud.db || !cloud.user) return null;
+  return cloud.db.collection("users").doc(cloud.user.uid).collection("app").doc("state");
+}
+function buildStatePayload(){
+  return {
+    schemaVersion: STORAGE_VERSION,
+    savedAtISO: new Date().toISOString(),
+    habits, events, stats, user, meta
+  };
+}
+function applyStatePayload(payload){
+  const {mutated} = migrateLoadedData(payload || {});
+  if(mutated) save();
+}
+function syncCloudStatus(msg){
+  const el = document.getElementById("cloudStatus");
+  if(el) el.textContent = `Cloud status: ${msg}`;
+}
+async function initFirebaseWithConfig(cfg){
+  if(typeof firebase === "undefined"){
+    syncCloudStatus("Firebase SDK not loaded.");
+    return false;
+  }
+  try{
+    if(!cfg) return false;
+    if(!cloud.app){
+      cloud.app = firebase.apps.length ? firebase.app() : firebase.initializeApp(cfg);
+    }
+    cloud.auth = firebase.auth();
+    cloud.db = firebase.firestore();
+    cloud.enabled = true;
+    syncCloudStatus("connected.");
+    return true;
+  }catch(e){
+    syncCloudStatus(`connect failed (${e.message || "unknown error"}).`);
+    return false;
+  }
+}
+function hydrateFirebaseConfigUI(){
+  const cfg = readFirebaseConfig();
+  if(!cfg) return;
+  if(fbApiKey) fbApiKey.value = cfg.apiKey || "";
+  if(fbAuthDomain) fbAuthDomain.value = cfg.authDomain || "";
+  if(fbProjectId) fbProjectId.value = cfg.projectId || "";
+  if(fbAppId) fbAppId.value = cfg.appId || "";
+}
+async function connectFirebase(){
+  const cfg = {
+    apiKey: String((fbApiKey && fbApiKey.value) || "").trim(),
+    authDomain: String((fbAuthDomain && fbAuthDomain.value) || "").trim(),
+    projectId: String((fbProjectId && fbProjectId.value) || "").trim(),
+    appId: String((fbAppId && fbAppId.value) || "").trim()
+  };
+  if(!cfg.apiKey || !cfg.authDomain || !cfg.projectId || !cfg.appId){
+    alert("Enter apiKey, authDomain, projectId, and appId.");
+    return;
+  }
+  writeFirebaseConfig(cfg);
+  const ok = await initFirebaseWithConfig(cfg);
+  if(ok){
+    setupCloudAuthListener();
+    syncCloudStatus("connected. Sign in to sync.");
+  }
+}
+function disconnectFirebase(){
+  try{
+    if(cloud.auth) cloud.auth.signOut();
+  }catch(e){}
+  clearFirebaseConfig();
+  cloud.enabled = false;
+  cloud.user = null;
+  cloud.auth = null;
+  cloud.db = null;
+  cloud.listenerReady = false;
+  syncCloudStatus("disconnected.");
+}
+async function signInCloud(email, password){
+  if(!cloud.enabled || !cloud.auth) return false;
+  try{
+    const cred = await cloud.auth.signInWithEmailAndPassword(email, password);
+    cloud.user = cred.user;
+    syncCloudStatus(`signed in as ${email}.`);
+    return true;
+  }catch(e){
+    const code = e && e.code ? String(e.code) : "";
+    if(code.includes("user-not-found")){
+      const cred = await cloud.auth.createUserWithEmailAndPassword(email, password);
+      cloud.user = cred.user;
+      syncCloudStatus(`new account created for ${email}.`);
+      return true;
+    }
+    alert(`Cloud sign-in failed: ${e.message || "unknown error"}`);
+    syncCloudStatus("sign-in failed.");
+    return false;
+  }
+}
+async function pullCloudState(){
+  const ref = cloudDocRef();
+  if(!ref) return false;
+  try{
+    const snap = await ref.get();
+    if(!snap.exists) return false;
+    applyStatePayload(snap.data());
+    syncCloudStatus("synced from cloud.");
+    return true;
+  }catch(e){
+    syncCloudStatus("cloud read failed.");
+    return false;
+  }
+}
+async function pushCloudState(){
+  const ref = cloudDocRef();
+  if(!ref || cloud.syncing) return;
+  try{
+    cloud.syncing = true;
+    await ref.set(buildStatePayload(), {merge:true});
+    syncCloudStatus("synced to cloud.");
+  }catch(e){
+    syncCloudStatus("cloud write failed.");
+  }finally{
+    cloud.syncing = false;
+  }
+}
+function scheduleCloudPush(){
+  if(!cloud.enabled || !cloud.user) return;
+  if(cloud.pushTimer) clearTimeout(cloud.pushTimer);
+  cloud.pushTimer = setTimeout(()=>{ pushCloudState(); }, 900);
+}
+function setupCloudAuthListener(){
+  if(!cloud.enabled || !cloud.auth || cloud.listenerReady) return;
+  cloud.listenerReady = true;
+  cloud.auth.onAuthStateChanged(async (u)=>{
+    cloud.user = u || null;
+    if(u){
+      syncCloudStatus(`session active (${u.email || "user"}).`);
+      if(app.classList.contains("hidden")){
+        const cloudEmail = normalizeEmail(u.email || "");
+        if(cloudEmail){
+          currentEmail = cloudEmail;
+          load(cloudEmail);
+          userEmail.value = cloudEmail;
+          username.value = user?.name || "";
+        }
+        login.classList.add("hidden");
+        app.classList.remove("hidden");
+        renderAll();
+      }
+      await pullCloudState();
+      renderAll();
+    }else{
+      syncCloudStatus("connected. Sign in to sync.");
+    }
+  });
 }
 const todayISO = () => {
   const d = new Date();
@@ -1166,6 +1369,7 @@ function save(){
   }catch(e){
     // Storage can be blocked in some browser/file contexts; keep UI working.
   }
+  scheduleCloudPush();
 }
 function loadLegacyGlobal(){
   if(localStorage.getItem(LEGACY_MIGRATED_KEY) === "1") return false;
@@ -1224,12 +1428,13 @@ function hydrateCalendarDefaults(){
 }
 
 /* -------------------- Login / Start -------------------- */
-function startApp(){
+async function startApp(){
   const typedEmail = normalizeEmail((userEmail.value || ""));
   if(!validEmail(typedEmail)){
     alert("Enter a valid email address.");
     return;
   }
+  const typedPassword = String((userPassword && userPassword.value) || "").trim();
   currentEmail = typedEmail;
   let hadSaved = load(currentEmail);
   if(!hadSaved && loadLegacyGlobal()){
@@ -1244,6 +1449,19 @@ function startApp(){
 
   // Ensure core habits exist (and use setup targets)
   ensureCoreHabits(!hadSaved);
+
+  if(cloud.enabled){
+    if(typedPassword.length < 6){
+      alert("Enter a password with at least 6 characters for cloud auth.");
+      return;
+    }
+    const authed = await signInCloud(currentEmail, typedPassword);
+    if(!authed) return;
+    const foundCloudState = await pullCloudState();
+    if(!foundCloudState){
+      await pushCloudState();
+    }
+  }
 
   // hide login, show app
   login.classList.add("hidden");
@@ -2405,11 +2623,19 @@ function renderAll(){
 }
 
 /* -------------------- Boot: always login first -------------------- */
-(function boot(){
+(async function boot(){
   registerPWA();
   document.addEventListener("keydown", handleGlobalShortcuts);
   setInterval(maybeSendPendingReminder, 60000);
   hydrateCalendarDefaults();
+  hydrateFirebaseConfigUI();
+  const cfg = readFirebaseConfig();
+  if(cfg){
+    const ok = await initFirebaseWithConfig(cfg);
+    if(ok) setupCloudAuthListener();
+  }else{
+    syncCloudStatus("not connected.");
+  }
   const lastEmail = normalizeEmail(localStorage.getItem(ACCOUNT_LAST_KEY));
   if(lastEmail && load(lastEmail)){
     userEmail.value = lastEmail;
